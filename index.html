@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>給与明細可視化ツール</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.4.120/pdf.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body { font-family: -apple-system, sans-serif; margin: 20px; background: #f4f4f9; }
+        .card { background: white; padding: 20px; border-radius: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); margin-bottom: 20px; }
+        .tabs { display: flex; gap: 10px; margin-bottom: 20px; overflow-x: auto; }
+        .tab-btn { padding: 10px 20px; border: none; border-radius: 20px; background: #ddd; white-space: nowrap; }
+        .tab-btn.active { background: #007aff; color: white; }
+        .controls { margin-bottom: 20px; }
+        select { width: 100%; padding: 10px; border-radius: 8px; border: 1px solid #ccc; font-size: 16px; }
+        #drop-zone { border: 2px dashed #007aff; padding: 30px; text-align: center; border-radius: 12px; color: #007aff; cursor: pointer; }
+        canvas { max-width: 100%; }
+    </style>
+</head>
+<body>
+
+<div class="card">
+    <h2>給与データ読み込み</h2>
+    <p>PDFファイルを複数選択してください</p>
+    <input type="file" id="file-input" multiple accept="application/pdf" style="display:none">
+    <div id="drop-zone" onclick="document.getElementById('file-input').click()">
+        ここをタップしてPDFを選択
+    </div>
+</div>
+
+<div id="main-content" style="display:none">
+    <div class="tabs">
+        <button class="tab-btn active" onclick="switchTab('income')">①入金</button>
+        <button class="tab-btn" onclick="switchTab('deduction')">②出金（税金等）</button>
+        <button class="tab-btn" onclick="switchTab('net')">③最終手取り</button>
+    </div>
+
+    <div class="card">
+        <div class="controls">
+            <label id="item-label">表示項目を選択：</label>
+            <select id="item-selector" onchange="updateChart()"></select>
+        </div>
+        <canvas id="myChart"></canvas>
+    </div>
+</div>
+
+<script>
+    const pdfjsLib = window['pdfjs-dist/build/pdf'];
+    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.4.120/pdf.worker.min.js';
+
+    let allData = []; // { date: Date, income: {}, deduction: {}, net: 0 }
+    let chart = null;
+    let currentCategory = 'income';
+
+    // PDF解析用のキーワード設定（お使いの明細に合わせて調整が必要な場合があります）
+    const keywords = {
+        income: ['基本給', '役職手当', '通勤費', '残業手当', '総支給額'],
+        deduction: ['健康保険', '厚生年金', '所得税', '住民税', '雇用保険', '控除合計'],
+        net: ['差引支給額', '手取額']
+    };
+
+    document.getElementById('file-input').addEventListener('change', async (e) => {
+        const files = Array.from(e.target.files);
+        if (files.length === 0) return;
+
+        allData = [];
+        for (const file of files) {
+            const data = await parsePDF(file);
+            if (data) allData.push(data);
+        }
+
+        // 日付順にソート
+        allData.sort((a, b) => a.date - b.date);
+
+        document.getElementById('main-content').style.display = 'block';
+        switchTab('income');
+    });
+
+    async function parsePDF(file) {
+        const arrayBuffer = await file.arrayBuffer();
+        const pdf = await pdfjsLib.getDocument({data: arrayBuffer}).promise;
+        let fullText = "";
+
+        for (let i = 1; i <= pdf.numPages; i++) {
+            const page = await pdf.getPage(i);
+            const content = await page.getTextContent();
+            fullText += content.items.map(item => item.str).join(' ');
+        }
+
+        // 数値抽出ロジック（簡易版：キーワードの後の数値を拾う）
+        const extract = (key) => {
+            const regex = new RegExp(`${key}[^0-9-]*?([0-9,]{3,})`);
+            const match = fullText.replace(/\s/g, '').match(regex);
+            return match ? parseInt(match[1].replace(/,/g, '')) : 0;
+        };
+
+        // 日付の抽出（例：2023年10月）
+        const dateMatch = fullText.match(/(\d{4})[年/](\d{1,2})/);
+        const date = dateMatch ? new Date(dateMatch[1], dateMatch[2] - 1) : new Date();
+
+        const res = { date, income: {}, deduction: {}, net: 0 };
+        keywords.income.forEach(k => res.income[k] = extract(k));
+        keywords.deduction.forEach(k => res.deduction[k] = extract(k));
+        res.net = extract('差引支給額') || extract('手取額') || (res.income['総支給額'] - res.deduction['控除合計']);
+
+        return res;
+    }
+
+    function switchTab(category) {
+        currentCategory = category;
+        document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+        event?.target?.classList?.add('active');
+
+        const selector = document.getElementById('item-selector');
+        selector.innerHTML = '';
+
+        if (category === 'net') {
+            const opt = new Option('手取り金額', 'net');
+            selector.add(opt);
+        } else {
+            keywords[category].forEach(k => {
+                const opt = new Option(k, k);
+                selector.add(opt);
+            });
+        }
+        updateChart();
+    }
+
+    function updateChart() {
+        const ctx = document.getElementById('myChart').getContext('2d');
+        const selectedItem = document.getElementById('item-selector').value;
+
+        const labels = allData.map(d => `${d.date.getFullYear()}/${d.date.getMonth()+1}`);
+        const dataValues = allData.map(d => {
+            if (currentCategory === 'net') return d.net;
+            return d[currentCategory][selectedItem] || 0;
+        });
+
+        if (chart) chart.destroy();
+
+        chart = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: labels,
+                datasets: [{
+                    label: selectedItem,
+                    data: dataValues,
+                    borderColor: '#007aff',
+                    backgroundColor: 'rgba(0,122,255,0.1)',
+                    fill: true,
+                    tension: 0.3
+                }]
+            },
+            options: {
+                responsive: true,
+                scales: { y: { beginAtZero: true } }
+            }
+        });
+    }
+</script>
+</body>
+</html>
